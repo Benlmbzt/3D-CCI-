@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maquette 3D - CCI Entrepôt</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    header {
+      background: #16213e;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    }
+    header img {
+      height: 36px;
+    }
+    header h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #e0e0e0;
+    }
+    #status {
+      background: #0f3460;
+      text-align: center;
+      padding: 10px;
+      font-size: 0.9rem;
+      color: #a0c4ff;
+    }
+    #viewer-container {
+      flex: 1;
+      position: relative;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+    }
+    #loading .spinner {
+      width: 50px;
+      height: 50px;
+      border: 4px solid #0f3460;
+      border-top: 4px solid #4fc3f7;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading p { color: #a0c4ff; font-size: 0.95rem; }
+    #toolbar {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      background: rgba(22,33,62,0.9);
+      padding: 10px 16px;
+      border-radius: 30px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    #toolbar button {
+      background: #0f3460;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.2s;
+    }
+    #toolbar button:hover { background: #4fc3f7; color: #1a1a2e; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏗️ Maquette 3D — CCI Entrepôt</h1>
+</header>
+
+<div id="status">Chargement de la maquette en cours...</div>
+
+<div id="viewer-container">
+  <div id="loading">
+    <div class="spinner"></div>
+    <p>Chargement du modèle IFC...</p>
+  </div>
+  <canvas id="three-canvas"></canvas>
+  <div id="toolbar">
+    <button onclick="resetCamera()">🔄 Réinitialiser</button>
+    <button onclick="toggleWireframe()">🔲 Filaire</button>
+    <button onclick="fitToScreen()">⛶ Ajuster</button>
+  </div>
+</div>
+
+<!-- Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- JSZip pour lire le ZIP -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- web-ifc via CDN -->
+<script src="https://unpkg.com/web-ifc@0.0.36/web-ifc-api.js"></script>
+
+<script>
+  // ─── Three.js setup ───────────────────────────────────────────────
+  const canvas = document.getElementById('three-canvas');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(canvas.parentElement.clientWidth, canvas.parentElement.clientHeight);
+  renderer.shadowMap.enabled = true;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a2e);
+
+  const camera = new THREE.PerspectiveCamera(60, canvas.parentElement.clientWidth / canvas.parentElement.clientHeight, 0.1, 10000);
+  camera.position.set(50, 50, 50);
+  camera.lookAt(0, 0, 0);
+
+  // Lights
+  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambient);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(100, 200, 100);
+  scene.add(dirLight);
+
+  // Grid
+  const grid = new THREE.GridHelper(200, 40, 0x4fc3f7, 0x0f3460);
+  scene.add(grid);
+
+  // ─── Mouse controls ───────────────────────────────────────────────
+  let isDragging = false, isRightDrag = false;
+  let prevMouse = { x: 0, y: 0 };
+  let spherical = { theta: Math.PI/4, phi: Math.PI/3, radius: 100 };
+  let target = new THREE.Vector3(0, 0, 0);
+
+  function updateCamera() {
+    camera.position.set(
+      target.x + spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta),
+      target.y + spherical.radius * Math.cos(spherical.phi),
+      target.z + spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta)
+    );
+    camera.lookAt(target);
+  }
+  updateCamera();
+
+  canvas.addEventListener('mousedown', e => {
+    isDragging = true;
+    isRightDrag = e.button === 2;
+    prevMouse = { x: e.clientX, y: e.clientY };
+  });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  window.addEventListener('mouseup', () => isDragging = false);
+  window.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    const dx = e.clientX - prevMouse.x;
+    const dy = e.clientY - prevMouse.y;
+    if (isRightDrag) {
+      const panSpeed = spherical.radius * 0.001;
+      const right = new THREE.Vector3();
+      const up = new THREE.Vector3();
+      camera.getWorldDirection(new THREE.Vector3());
+      right.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).normalize();
+      up.copy(camera.up);
+      target.addScaledVector(right, -dx * panSpeed);
+      target.addScaledVector(up, dy * panSpeed);
+    } else {
+      spherical.theta -= dx * 0.005;
+      spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi - dy * 0.005));
+    }
+    prevMouse = { x: e.clientX, y: e.clientY };
+    updateCamera();
+  });
+  canvas.addEventListener('wheel', e => {
+    spherical.radius = Math.max(5, spherical.radius + e.deltaY * 0.05);
+    updateCamera();
+  });
+
+  // Touch support
+  let lastTouchDist = 0;
+  canvas.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { isDragging = true; isRightDrag = false; prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+    if (e.touches.length === 2) { lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }
+  });
+  canvas.addEventListener('touchend', () => isDragging = false);
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches.length === 1 && isDragging) {
+      const dx = e.touches[0].clientX - prevMouse.x;
+      const dy = e.touches[0].clientY - prevMouse.y;
+      spherical.theta -= dx * 0.005;
+      spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi - dy * 0.005));
+      prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      updateCamera();
+    }
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      spherical.radius = Math.max(5, spherical.radius - (dist - lastTouchDist) * 0.2);
+      lastTouchDist = dist;
+      updateCamera();
+    }
+  }, { passive: false });
+
+  // ─── Resize ───────────────────────────────────────────────────────
+  window.addEventListener('resize', () => {
+    const w = canvas.parentElement.clientWidth;
+    const h = canvas.parentElement.clientHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  });
+
+  // ─── Animate ──────────────────────────────────────────────────────
+  function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+  animate();
+
+  // ─── Toolbar ──────────────────────────────────────────────────────
+  let wireframe = false;
+  function resetCamera() { spherical = { theta: Math.PI/4, phi: Math.PI/3, radius: 100 }; target.set(0,0,0); updateCamera(); }
+  function toggleWireframe() {
+    wireframe = !wireframe;
+    scene.traverse(obj => { if (obj.isMesh && obj.material) obj.material.wireframe = wireframe; });
+  }
+  function fitToScreen() {
+    const box = new THREE.Box3().setFromObject(scene);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    spherical.radius = Math.max(size.x, size.y, size.z) * 1.5;
+    target.copy(center);
+    updateCamera();
+  }
+
+  // ─── Load IFC from ZIP ────────────────────────────────────────────
+  const IFC_FILENAME = 'CCI Entrepôt_DET.ifc';
+  const ZIP_FILENAME = '__CCI Entrepôt_____DET.zip__';
+
+  async function loadIFC() {
+    const statusEl = document.getElementById('status');
+    const loadingEl = document.getElementById('loading');
+
+    try {
+      statusEl.textContent = '📦 Décompression du fichier ZIP...';
+
+      // Fetch the zip
+      const response = await fetch(ZIP_FILENAME);
+      if (!response.ok) throw new Error('Fichier ZIP introuvable');
+      const zipData = await response.arrayBuffer();
+
+      const zip = await JSZip.loadAsync(zipData);
+      const ifcFile = zip.file(IFC_FILENAME) || Object.values(zip.files).find(f => f.name.endsWith('.ifc'));
+      if (!ifcFile) throw new Error('Fichier IFC non trouvé dans le ZIP');
+
+      statusEl.textContent = '🔄 Lecture de la maquette IFC...';
+      const ifcData = await ifcFile.async('arraybuffer');
+
+      // Init web-ifc
+      const ifcApi = new WebIFC.IfcAPI();
+      await ifcApi.Init();
+
+      const modelID = ifcApi.OpenModel(new Uint8Array(ifcData));
+      statusEl.textContent = '🏗️ Construction du modèle 3D...';
+
+      // Get geometry
+      ifcApi.StreamAllMeshes(modelID, (mesh) => {
+        const placedGeometries = mesh.geometries;
+        for (let i = 0; i < placedGeometries.size(); i++) {
+          const placedGeom = placedGeometries.get(i);
+          const geomData = ifcApi.GetGeometry(modelID, placedGeom.geometryExpressID);
+          const verts = ifcApi.GetVertexArray(geomData.GetVertexData(), geomData.GetVertexDataSize());
+          const indices = ifcApi.GetIndexArray(geomData.GetIndexData(), geomData.GetIndexDataSize());
+
+          const geometry = new THREE.BufferGeometry();
+          const positions = [];
+          const normals = [];
+          for (let j = 0; j < verts.length; j += 6) {
+            positions.push(verts[j], verts[j+1], verts[j+2]);
+            normals.push(verts[j+3], verts[j+4], verts[j+5]);
+          }
+          geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+          geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+          geometry.setIndex(Array.from(indices));
+
+          const color = placedGeom.color;
+          const material = new THREE.MeshPhongMaterial({
+            color: new THREE.Color(color.x, color.y, color.z),
+            opacity: color.w,
+            transparent: color.w < 1,
+            side: THREE.DoubleSide
+          });
+
+          const matrix = new THREE.Matrix4();
+          const m = placedGeom.flatTransformation;
+          matrix.set(m[0],m[4],m[8],m[12], m[1],m[5],m[9],m[13], m[2],m[6],m[10],m[14], m[3],m[7],m[11],m[15]);
+
+          const mesh3d = new THREE.Mesh(geometry, material);
+          mesh3d.matrix.copy(matrix);
+          mesh3d.matrixAutoUpdate = false;
+          scene.add(mesh3d);
+        }
+      });
+
+      ifcApi.CloseModel(modelID);
+      loadingEl.style.display = 'none';
+      statusEl.textContent = '✅ Maquette chargée — Clic gauche : rotation | Clic droit : déplacer | Molette : zoom';
+      statusEl.style.background = '#1a472a';
+      fitToScreen();
+
+    } catch (err) {
+      loadingEl.style.display = 'none';
+      statusEl.textContent = '❌ Erreur : ' + err.message;
+      statusEl.style.background = '#6b1a1a';
+      console.error(err);
+    }
+  }
+
+  loadIFC();
+</script>
+</body>
+</html>
